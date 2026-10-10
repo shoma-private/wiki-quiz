@@ -10,6 +10,9 @@ const BLANK = "【 ？ 】";
 const MAX_TEXT_LENGTH = 160;
 const SKIP_SECTIONS = /脚注|注釈|出典|参考|関連項目|外部リンク|関連書籍|ギャラリー/;
 const LEADING_CONNECTOR = /^(また|なお|さらに|一方|ただし|しかし|そのため|このため)、/;
+// 年号や年・日付は推測しようがなく面白くないので、答えにも選択肢にも使わない
+const DATE_LIKE = /[\d０-９]|[一二三四五六七八九十百千]+(年|世紀)|世紀|年代/;
+const ERA_CATEGORY = /元号|年号/;
 const UNCLEAR_SUBJECT = /^(これ|それ|この|その|同|彼|彼女|ここ|そこ|上記|前者|後者)/;
 
 // ---------- Wikipedia からデータを取る ----------
@@ -235,6 +238,12 @@ function cleanSentence(s) {
   return text;
 }
 
+function isEraOrDate(text, categories) {
+  if (DATE_LIKE.test(text)) return true;
+  for (const c of categories || []) if (ERA_CATEGORY.test(c)) return true;
+  return false;
+}
+
 function isGoodTerm(term, themeNames) {
   if (term.length < 2 || term.length > 20 || /^[\d,.]/.test(term)) return false;
   for (const name of themeNames) {
@@ -266,7 +275,8 @@ function linkDistractors(c, pool, catsMap) {
   const scored = [];
   const seen = new Set([c.term]);
   for (const o of pool.values()) {
-    if (o.target === c.target || seen.has(o.text)) continue;
+    if (o.target === c.target || seen.has(o.text) || !catsMap.has(o.target)) continue;
+    if (isEraOrDate(o.text, catsMap.get(o.target))) continue;
     if (o.text.includes(c.term) || c.term.includes(o.text) || c.raw.includes(o.text)) continue;
     let shared = 0;
     for (const cat of catsMap.get(o.target) || []) if (own.has(cat)) shared++;
@@ -307,7 +317,7 @@ async function buildArticleQuestions(article, themeNames, count) {
   for (const c of ordered) {
     if (questions.length >= count) break;
     if (usedSentences.has(c.s) || usedAnswers.has(c.term)) continue;
-    if (!catsMap.has(c.target)) continue;
+    if (!catsMap.has(c.target) || isEraOrDate(c.term, catsMap.get(c.target))) continue;
 
     const distractors = linkDistractors(c, pool, catsMap);
     const text = cleanSentence(c.raw.split(c.term).join(BLANK));
@@ -434,15 +444,12 @@ function toItems(pages, themeNames) {
   for (const p of pages) {
     const name = displayName(p.title);
     if (!name || seen.has(name) || /一覧/.test(name) || themeNames.has(p.title) || themeNames.has(name)) continue;
+    const categories = (p.categories || []).map((c) => c.title);
+    if (isEraOrDate(name, categories)) continue;
     const text = makeQuestionText(p.extract, name);
     if (text.length < 30) continue;
     seen.add(name);
-    items.push({
-      title: p.title,
-      name,
-      text,
-      categories: (p.categories || []).map((c) => c.title),
-    });
+    items.push({ title: p.title, name, text, categories });
   }
   return items;
 }
