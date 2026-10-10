@@ -3,23 +3,100 @@
 const API_URL = "https://ja.wikipedia.org/w/api.php";
 const SEARCH_LIMIT = 40;
 const DETAIL_CHUNK = 20; // extracts は1回のリクエストで最大20件まで
+const TITLES_PER_QUERY = 50;
+const MAX_POOL_TITLES = 100;
 const MASK = "○○";
+const BLANK = "【 ？ 】";
 const MAX_TEXT_LENGTH = 160;
+const SKIP_SECTIONS = /脚注|注釈|出典|参考|関連項目|外部リンク|関連書籍|ギャラリー/;
+const LEADING_CONNECTOR = /^(また|なお|さらに|一方|ただし|しかし|そのため|このため)、/;
+const UNCLEAR_SUBJECT = /^(これ|それ|この|その|同|彼|彼女|ここ|そこ|上記|前者|後者)/;
+const NUMBER_RE = /(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?\s?(世紀|年代|年|か月|ヶ月|カ月|時間|種類|品種|種|位|倍|パーセント|%|％|℃|km|cm|mm|kg|mg|kcal|g|m|トン|万|億|円|個|本|回|歳)/g;
 
 // ---------- Wikipedia からデータを取る ----------
 
-async function wikiQuery(params) {
+async function apiGet(params) {
   const url = new URL(API_URL);
-  const all = { action: "query", format: "json", formatversion: "2", origin: "*", ...params };
+  const all = { format: "json", formatversion: "2", origin: "*", ...params };
   for (const [key, value] of Object.entries(all)) {
     url.searchParams.set(key, value);
   }
   const res = await fetch(url);
   if (res.status === 429) throw new Error("Wikipedia が混み合っています。少し待ってからもう一度試してください。");
   if (!res.ok) throw new Error(`Wikipedia へのアクセスに失敗しました (HTTP ${res.status})`);
-  const data = await res.json();
+  return res.json();
+}
+
+async function wikiQuery(params) {
+  const data = await apiGet({ action: "query", ...params });
   if (data.error) throw new Error(data.error.info);
   return data;
+}
+
+async function wikiParse(page) {
+  const data = await apiGet({
+    action: "parse",
+    page,
+    redirects: 1,
+    prop: "text|properties",
+    disableeditsection: 1,
+    disabletoc: 1,
+  });
+  if (data.error) {
+    if (data.error.code === "missingtitle" || data.error.code === "invalidtitle") return null;
+    throw new Error(data.error.info);
+  }
+  return data.parse;
+}
+
+function isDisambiguation(parsed) {
+  const props = parsed.properties || {};
+  return Array.isArray(props) ? props.some((p) => p.name === "disambiguation") : "disambiguation" in props;
+}
+
+// テーマの記事を探す。「人参」→「ニンジン」のような転送にも対応し、
+// 見つからないときや曖昧さ回避ページのときは検索の上位から選ぶ
+async function resolveArticle(theme) {
+  const direct = await wikiParse(theme);
+  if (direct && !isDisambiguation(direct)) return direct;
+
+  const search = await wikiQuery({ list: "search", srsearch: theme, srlimit: 2, srnamespace: 0, srprop: "" });
+  for (const r of search.query.search) {
+    const parsed = await wikiParse(r.title);
+    if (parsed && !isDisambiguation(parsed)) return parsed;
+  }
+  return null;
+}
+
+async function fetchCategories(titles) {
+  const result = new Map(titles.map((t) => [t, new Set()]));
+  for (let i = 0; i < titles.length; i += TITLES_PER_QUERY) {
+    const chunk = titles.slice(i, i + TITLES_PER_QUERY);
+    const alias = new Map();
+    let cont = {};
+    for (let guard = 0; guard < 5; guard++) {
+      const data = await wikiQuery({
+        prop: "categories",
+        titles: chunk.join("|"),
+        cllimit: "max",
+        clshow: "!hidden",
+        redirects: 1,
+        ...cont,
+      });
+      for (const r of [...(data.query.normalized || []), ...(data.query.redirects || [])]) {
+        alias.set(r.from, r.to);
+      }
+      const pageCats = new Map((data.query.pages || []).map((p) => [p.title, (p.categories || []).map((c) => c.title)]));
+      for (const original of chunk) {
+        let resolved = original;
+        for (let n = 0; n < 3 && alias.has(resolved); n++) resolved = alias.get(resolved);
+        for (const c of pageCats.get(resolved) || []) result.get(original).add(c);
+      }
+      if (!data.continue) break;
+      cont = data.continue;
+    }
+  }
+  return result;
 }
 
 async function fetchPages(theme) {
@@ -53,7 +130,7 @@ async function fetchPages(theme) {
     .sort((a, b) => (rank.get(a.title) ?? 999) - (rank.get(b.title) ?? 999));
 }
 
-// ---------- 問題を組み立てる ----------
+// ---------- 共通の小物 ----------
 
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -62,6 +139,271 @@ function escapeRegExp(s) {
 // 「ビール (曲)」のような曖昧さ回避の括弧を外した表示名
 function displayName(title) {
   return title.replace(/\s*[（(][^（）()]*[）)]$/, "").trim();
+}
+
+function shuffle(array) {
+  const a = [...array];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function randInt(min, max) {
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+function articleUrl(title, sectionId) {
+  const base = "https://ja.wikipedia.org/wiki/" + encodeURIComponent(title.replace(/ /g, "_"));
+  return sectionId ? `${base}#${encodeURIComponent(sectionId)}` : base;
+}
+
+// ---------- 記事の本文から穴埋め問題を作る ----------
+
+function linkTarget(a) {
+  const href = a.getAttribute("href") || "";
+  const title = a.getAttribute("title");
+  if (!href.startsWith("/wiki/") || !title || title.includes(":") || a.classList.contains("new")) return null;
+  return title;
+}
+
+// 段落を文に分け、文ごとに「どこがどの記事へのリンクか」を記録する
+function splitBlock(block, section, sectionId) {
+  let text = "";
+  const links = [];
+  const walker = block.ownerDocument.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const value = node.nodeValue;
+    const a = node.parentElement.closest("a");
+    const target = a && block.contains(a) ? linkTarget(a) : null;
+    if (target) {
+      const last = links[links.length - 1];
+      if (last && last.el === a) last.end += value.length;
+      else links.push({ el: a, target, start: text.length, end: text.length + value.length });
+    }
+    text += value;
+  }
+
+  const sentences = [];
+  const re = /[^。！？]+[。！？]?/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const start = m.index;
+    const end = start + m[0].length;
+    sentences.push({
+      raw: m[0],
+      section,
+      sectionId,
+      links: links
+        .filter((l) => l.start >= start && l.end <= end)
+        .map((l) => ({ text: text.slice(l.start, l.end).trim(), target: l.target })),
+    });
+  }
+  return sentences;
+}
+
+function extractSentences(html) {
+  // DOMParser で作った文書はスクリプトを実行せず、画像なども読み込まない。
+  // 埋め込みのスタイルはページの安全設定に引っかかって警告が出るので先に取り除く
+  const cleaned = html.replace(/<style[\s\S]*?<\/style>/gi, "").replace(/\sstyle="[^"]*"/gi, "");
+  const doc = new DOMParser().parseFromString(cleaned, "text/html");
+  const root = doc.querySelector(".mw-parser-output") || doc.body;
+  root
+    .querySelectorAll("sup, style, script, table, figure, .mw-editsection, .noprint, .thumb, .navbox, .hatnote, .dablink, .mw-empty-elt")
+    .forEach((e) => e.remove());
+
+  const sentences = [];
+  let h2 = "";
+  let section = "概要";
+  let sectionId = "";
+  for (const el of root.children) {
+    const heading = el.matches("h2, h3, h4") ? el : el.matches(".mw-heading") ? el.querySelector("h2, h3, h4") : null;
+    if (heading) {
+      section = heading.textContent.trim();
+      sectionId = heading.id || heading.querySelector(".mw-headline")?.id || "";
+      if (heading.tagName === "H2") h2 = section;
+      continue;
+    }
+    if (SKIP_SECTIONS.test(h2)) continue;
+    const blocks = el.matches("p") ? [el] : el.matches("ul, ol") ? [...el.querySelectorAll(":scope > li")] : [];
+    for (const block of blocks) sentences.push(...splitBlock(block, section, sectionId));
+  }
+  return sentences;
+}
+
+function cleanSentence(s) {
+  const text = s.replace(/\s+/g, " ").trim().replace(LEADING_CONNECTOR, "");
+  if (text.length < 15 || text.length > MAX_TEXT_LENGTH || UNCLEAR_SUBJECT.test(text)) return null;
+  // 「。」で終わらない箇条書きの断片は文脈がわからないので使わない
+  if (!/[。！？]$/.test(text)) return null;
+  return text;
+}
+
+function isGoodTerm(term, themeNames) {
+  if (term.length < 2 || term.length > 20 || /^[\d,.]/.test(term)) return false;
+  for (const name of themeNames) {
+    if (term === name || term.includes(name) || name.includes(term)) return false;
+  }
+  return true;
+}
+
+function findNumbers(raw) {
+  const found = [];
+  for (const m of raw.matchAll(NUMBER_RE)) {
+    const prev = raw[m.index - 1] || "";
+    if (/[\d.,A-Za-z第]/.test(prev)) continue;
+    // 「16 - 17世紀」のような範囲の片方は答えが決まらないので使わない
+    const before = raw.slice(0, m.index).trimEnd().slice(-1);
+    const after = raw.slice(m.index + m[0].length).trimStart()[0] || "";
+    if (/[-–—~〜～]/.test(before) || /[-–—~〜～]/.test(after)) continue;
+    // 「享保9年」「同39年」のような元号の年も答えようがないので使わない
+    if (m[3] === "年" && Number(m[1]) < 100 && /[\u4E00-\u9FFF]/.test(prev) && prev !== "約") continue;
+    found.push({
+      offset: m.index,
+      length: m[0].length,
+      value: Number(m[1].replace(/,/g, "") + (m[2] || "")),
+      decimals: m[2] ? m[2].length - 1 : 0,
+      comma: m[1].includes(","),
+      unit: m[3],
+      term: m[0].replace(/\s/g, ""),
+    });
+  }
+  return found;
+}
+
+function formatNumber(value, decimals, comma) {
+  const fixed = value.toFixed(decimals);
+  if (!comma) return fixed;
+  const [int, frac] = fixed.split(".");
+  return int.replace(/\B(?=(\d{3})+(?!\d))/g, ",") + (frac ? "." + frac : "");
+}
+
+// 正解に近い、それらしい数字を3つ作る
+function numberDistractors(n) {
+  const { value, unit, decimals, comma } = n;
+  const thisYear = new Date().getFullYear();
+  const results = new Set();
+  for (let tries = 0; results.size < 3 && tries < 60; tries++) {
+    const sign = Math.random() < 0.5 ? -1 : 1;
+    let v;
+    if (unit === "年" && value >= 1000) v = value + sign * randInt(3, 120);
+    else if (unit === "年代") v = value + sign * 10 * randInt(1, 4);
+    else if (unit === "世紀" || unit === "位") v = value + sign * randInt(1, 3);
+    else if (/^(%|％|パーセント)$/.test(unit)) v = Math.min(100, value + sign * randInt(5, 30));
+    else if (value < 10 && decimals === 0) v = value + sign * randInt(1, 4);
+    else v = value * [0.3, 0.5, 0.7, 1.5, 2, 3, 5][randInt(0, 6)];
+    if (decimals === 0) v = Math.round(v);
+    if (v <= 0 || v === value || (unit === "年" && v > thisYear)) continue;
+    results.add(formatNumber(v, decimals, comma) + unit);
+  }
+  results.delete(n.term);
+  return results.size >= 3 ? [...results].slice(0, 3) : null;
+}
+
+function scriptOf(s) {
+  if (/^[゠-ヿー・]+$/.test(s)) return "katakana";
+  if (/^[぀-ゟー]+$/.test(s)) return "hiragana";
+  if (/^[A-Za-z0-9 .\-]+$/.test(s)) return "latin";
+  return "kanji";
+}
+
+// 見た目が似た言葉（同じ文字種、「〜県」「〜時代」のように同じ漢字で終わる）ほど高得点
+function shapeScore(a, b) {
+  let score = 0;
+  if (scriptOf(a) === scriptOf(b)) score += 0.5;
+  const last = a.slice(-1);
+  if (last === b.slice(-1) && /[一-鿿]/.test(last)) score += 1;
+  if (Math.abs(a.length - b.length) <= 2) score += 0.2;
+  return score;
+}
+
+// 同じカテゴリに属する言葉を優先して「はずれ選択肢」にする
+function linkDistractors(c, pool, catsMap) {
+  const own = catsMap.get(c.target) || new Set();
+  const scored = [];
+  const seen = new Set([c.term]);
+  for (const o of pool.values()) {
+    if (o.target === c.target || seen.has(o.text)) continue;
+    if (o.text.includes(c.term) || c.term.includes(o.text) || c.raw.includes(o.text)) continue;
+    let shared = 0;
+    for (const cat of catsMap.get(o.target) || []) if (own.has(cat)) shared++;
+    seen.add(o.text);
+    scored.push({ text: o.text, score: shared * 2 + shapeScore(c.term, o.text) + Math.random() * 0.3 });
+  }
+  const picked = scored.filter((x) => x.score >= 1).sort((a, b) => b.score - a.score).slice(0, 3);
+  return picked.length === 3 ? picked.map((x) => x.text) : null;
+}
+
+async function buildArticleQuestions(article, themeNames, count) {
+  const title = article.title;
+  const sentences = extractSentences(article.text);
+
+  const candidates = [];
+  const pool = new Map();
+  for (const s of sentences) {
+    if (!cleanSentence(s.raw)) continue;
+    for (const l of s.links) {
+      if (!isGoodTerm(l.text, themeNames) || themeNames.has(l.target)) continue;
+      if (!pool.has(l.target)) pool.set(l.target, { text: l.text, target: l.target });
+      candidates.push({ kind: "link", s, raw: s.raw, term: l.text, target: l.target });
+    }
+    for (const n of findNumbers(s.raw)) {
+      candidates.push({ kind: "number", s, raw: s.raw, ...n });
+    }
+  }
+  if (candidates.length === 0) return [];
+
+  // 問題の候補になる言葉を優先してカテゴリを調べる
+  const answerTargets = new Set(candidates.filter((c) => c.kind === "link").map((c) => c.target));
+  const titles = [...answerTargets, ...[...pool.keys()].filter((t) => !answerTargets.has(t))].slice(0, MAX_POOL_TITLES);
+  const catsMap = titles.length ? await fetchCategories(titles) : new Map();
+
+  // 概要より本文の節のほうが雑学っぽいので先に使う（同じ節の中ではランダム）
+  const ordered = shuffle(candidates).sort((a, b) => (a.s.section === "概要") - (b.s.section === "概要"));
+  const maxNumbers = Math.ceil(count / 2);
+  const usedSentences = new Set();
+  const usedAnswers = new Set();
+  const questions = [];
+  let numbers = 0;
+
+  for (const c of ordered) {
+    if (questions.length >= count) break;
+    if (usedSentences.has(c.s) || usedAnswers.has(c.term)) continue;
+    if (c.kind === "number" && numbers >= maxNumbers) continue;
+
+    let text;
+    let distractors;
+    if (c.kind === "link") {
+      if (!pool.has(c.target) || !catsMap.has(c.target)) continue;
+      distractors = linkDistractors(c, pool, catsMap);
+      text = cleanSentence(c.raw.split(c.term).join(BLANK));
+    } else {
+      distractors = numberDistractors(c);
+      text = cleanSentence(c.raw.slice(0, c.offset) + BLANK + c.raw.slice(c.offset + c.length));
+    }
+    if (!distractors || !text || !text.includes(BLANK)) continue;
+
+    usedSentences.add(c.s);
+    usedAnswers.add(c.term);
+    if (c.kind === "number") numbers++;
+    questions.push({
+      prompt: `「${displayName(title)}」の記事より。${BLANK}に入るのは？`,
+      text,
+      answer: c.term,
+      choices: shuffle([c.term, ...distractors]),
+      full: cleanSentence(c.raw),
+      sourceLabel: `Wikipedia「${title}」の「${c.s.section}」を読む`,
+      sourceUrl: articleUrl(title, c.s.section === "概要" ? "" : c.s.sectionId),
+    });
+  }
+  return questions;
+}
+
+// ---------- 関連記事の概要から「説明はどれ？」問題を作る ----------
+
+function toKatakana(s) {
+  return s.replace(/[ぁ-ゖ]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0x60));
 }
 
 // 伏せ字の直後にある読みや別名の括弧書きは答えのヒントになるので消す
@@ -91,10 +433,6 @@ function removeParenAfterMask(text) {
     }
   }
   return out;
-}
-
-function toKatakana(s) {
-  return s.replace(/[ぁ-ゖ]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0x60));
 }
 
 // 書き出しの「麒麟麦酒株式会社（きりんビール、英: Kirin Brewery …）は」から、
@@ -162,21 +500,12 @@ function makeQuestionText(extract, name) {
   return out.trim();
 }
 
-function shuffle(array) {
-  const a = [...array];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
-function toItems(pages) {
+function toItems(pages, themeNames) {
   const seen = new Set();
   const items = [];
   for (const p of pages) {
     const name = displayName(p.title);
-    if (!name || seen.has(name) || /一覧/.test(name)) continue;
+    if (!name || seen.has(name) || /一覧/.test(name) || themeNames.has(p.title) || themeNames.has(name)) continue;
     const text = makeQuestionText(p.extract, name);
     if (text.length < 30) continue;
     seen.add(name);
@@ -201,35 +530,54 @@ function pickDistractors(item, items) {
     .map((c) => c.o);
 }
 
-function buildQuestions(items, count) {
+async function buildSummaryQuestions(theme, themeNames, count, usedAnswers) {
+  const items = toItems(await fetchPages(theme), themeNames);
   // 検索で上位の記事ほどテーマに近いので、上位から多めに候補を取って混ぜる
   const candidates = shuffle(items.slice(0, Math.max(count * 2, 20)));
   const questions = [];
   for (const item of candidates) {
     if (questions.length >= count) break;
+    if (usedAnswers.has(item.name)) continue;
     const distractors = pickDistractors(item, items);
     if (distractors.length < 3) continue;
     questions.push({
-      answer: item,
+      prompt: "この説明に当てはまるのはどれ？",
       text: item.text,
-      choices: shuffle([item, ...distractors]),
+      answer: item.name,
+      choices: shuffle([item.name, ...distractors.map((d) => d.name)]),
+      full: null,
+      sourceLabel: `Wikipedia で「${item.name}」を読む`,
+      sourceUrl: articleUrl(item.title),
     });
   }
   return questions;
 }
 
 async function createQuiz(theme, count) {
-  const pages = await fetchPages(theme);
-  const items = toItems(pages);
-  const questions = buildQuestions(items, count);
+  const themeNames = new Set([theme]);
+  let questions = [];
+
+  const article = await resolveArticle(theme);
+  if (article) {
+    themeNames.add(article.title);
+    themeNames.add(displayName(article.title));
+    questions = await buildArticleQuestions(article, themeNames, count);
+  }
+
+  // 記事が短くて足りないぶんは、関連記事の概要から作る
+  if (questions.length < count) {
+    try {
+      const used = new Set(questions.map((q) => q.answer));
+      questions.push(...(await buildSummaryQuestions(theme, themeNames, count - questions.length, used)));
+    } catch (e) {
+      if (questions.length === 0) throw e;
+    }
+  }
+
   if (questions.length < 3) {
     throw new Error(`「${theme}」に関する記事が少なくて、問題を作れませんでした。別の言葉で試してみてください。`);
   }
-  return questions;
-}
-
-function articleUrl(title) {
-  return "https://ja.wikipedia.org/wiki/" + encodeURIComponent(title.replace(/ /g, "_"));
+  return shuffle(questions);
 }
 
 // ---------- 画面 ----------
@@ -278,6 +626,7 @@ function initApp() {
   function renderQuestion() {
     const q = state.questions[state.index];
     $("progress").textContent = `${state.index + 1} / ${state.questions.length}`;
+    $("question-label").textContent = q.prompt;
     $("question").textContent = q.text;
     $("feedback").hidden = true;
 
@@ -286,7 +635,7 @@ function initApp() {
     q.choices.forEach((choice, i) => {
       const button = document.createElement("button");
       button.type = "button";
-      button.textContent = `${i + 1}. ${choice.name}`;
+      button.textContent = `${i + 1}. ${choice}`;
       button.addEventListener("click", () => answer(choice, button));
       choices.append(button);
     });
@@ -305,9 +654,11 @@ function initApp() {
     });
     if (!correct) button.classList.add("wrong");
 
-    $("feedback-text").textContent = correct ? "⭕ 正解！" : `❌ 残念… 正解は「${q.answer.name}」`;
-    $("source-link").textContent = `Wikipedia で「${q.answer.name}」を読む`;
-    $("source-link").href = articleUrl(q.answer.title);
+    $("feedback-text").textContent = correct ? "⭕ 正解！" : `❌ 残念… 正解は「${q.answer}」`;
+    $("full-text").textContent = q.full || "";
+    $("full-text").hidden = !q.full;
+    $("source-link").textContent = q.sourceLabel;
+    $("source-link").href = q.sourceUrl;
     const isLast = state.index === state.questions.length - 1;
     $("next").textContent = isLast ? "結果を見る" : "次の問題へ";
     $("feedback").hidden = false;
@@ -343,15 +694,15 @@ function initApp() {
       mark.className = a.correct ? "mark-correct" : "mark-wrong";
       mark.textContent = a.correct ? "⭕ " : "❌ ";
       const link = document.createElement("a");
-      link.href = articleUrl(a.question.answer.title);
+      link.href = a.question.sourceUrl;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
-      link.textContent = a.question.answer.name;
+      link.textContent = a.question.answer;
       li.append(mark, link);
       if (!a.correct) {
         const yours = document.createElement("span");
         yours.className = "your-answer";
-        yours.textContent = `（あなたの答え: ${a.choice.name}）`;
+        yours.textContent = `（あなたの答え: ${a.choice}）`;
         li.append(yours);
       }
       review.append(li);
@@ -384,8 +735,4 @@ function initApp() {
   if (initialTheme) $("theme").value = initialTheme.slice(0, 50);
 }
 
-if (typeof document !== "undefined") {
-  initApp();
-} else if (typeof module !== "undefined") {
-  module.exports = { createQuiz, makeQuestionText, displayName };
-}
+if (document.getElementById("start-form")) initApp();

@@ -12,7 +12,7 @@
   <main>
     <section id="start">
       <h1>なんでも4択クイズ</h1>
-      <p class="lead">好きなテーマを入れると、Wikipedia の記事から4択クイズを作ります。</p>
+      <p class="lead">好きなテーマを入れると、そのテーマの Wikipedia 記事から雑学4択クイズを作ります。</p>
       <form id="start-form">
         <label for="theme">テーマ</label>
         <input id="theme" type="text" placeholder="例: ビール" maxlength="50" required autocomplete="off" enterkeyhint="go">
@@ -45,11 +45,12 @@
         <span id="quiz-theme"></span>
         <span id="progress"></span>
       </div>
-      <p class="question-label">この説明に当てはまるのはどれ？</p>
+      <p id="question-label" class="question-label"></p>
       <blockquote id="question"></blockquote>
       <div id="choices" class="choices"></div>
       <div id="feedback" hidden>
         <p id="feedback-text"></p>
+        <p id="full-text" class="full-text" hidden></p>
         <a id="source-link" target="_blank" rel="noopener noreferrer"></a>
         <button id="next" type="button" class="primary"></button>
       </div>

@@ -238,3 +238,12 @@ footer {
   color: var(--muted);
   font-size: 0.8rem;
 }
+
+.full-text {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 0.95rem;
+}
