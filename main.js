@@ -11,7 +11,6 @@ const MAX_TEXT_LENGTH = 160;
 const SKIP_SECTIONS = /脚注|注釈|出典|参考|関連項目|外部リンク|関連書籍|ギャラリー/;
 const LEADING_CONNECTOR = /^(また|なお|さらに|一方|ただし|しかし|そのため|このため)、/;
 const UNCLEAR_SUBJECT = /^(これ|それ|この|その|同|彼|彼女|ここ|そこ|上記|前者|後者)/;
-const NUMBER_RE = /(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?\s?(世紀|年代|年|か月|ヶ月|カ月|時間|種類|品種|種|位|倍|パーセント|%|％|℃|km|cm|mm|kg|mg|kcal|g|m|トン|万|億|円|個|本|回|歳)/g;
 
 // ---------- Wikipedia からデータを取る ----------
 
@@ -150,10 +149,6 @@ function shuffle(array) {
   return a;
 }
 
-function randInt(min, max) {
-  return min + Math.floor(Math.random() * (max - min + 1));
-}
-
 function articleUrl(title, sectionId) {
   const base = "https://ja.wikipedia.org/wiki/" + encodeURIComponent(title.replace(/ /g, "_"));
   return sectionId ? `${base}#${encodeURIComponent(sectionId)}` : base;
@@ -248,59 +243,6 @@ function isGoodTerm(term, themeNames) {
   return true;
 }
 
-function findNumbers(raw) {
-  const found = [];
-  for (const m of raw.matchAll(NUMBER_RE)) {
-    const prev = raw[m.index - 1] || "";
-    if (/[\d.,A-Za-z第]/.test(prev)) continue;
-    // 「16 - 17世紀」のような範囲の片方は答えが決まらないので使わない
-    const before = raw.slice(0, m.index).trimEnd().slice(-1);
-    const after = raw.slice(m.index + m[0].length).trimStart()[0] || "";
-    if (/[-–—~〜～]/.test(before) || /[-–—~〜～]/.test(after)) continue;
-    // 「享保9年」「同39年」のような元号の年も答えようがないので使わない
-    if (m[3] === "年" && Number(m[1]) < 100 && /[\u4E00-\u9FFF]/.test(prev) && prev !== "約") continue;
-    found.push({
-      offset: m.index,
-      length: m[0].length,
-      value: Number(m[1].replace(/,/g, "") + (m[2] || "")),
-      decimals: m[2] ? m[2].length - 1 : 0,
-      comma: m[1].includes(","),
-      unit: m[3],
-      term: m[0].replace(/\s/g, ""),
-    });
-  }
-  return found;
-}
-
-function formatNumber(value, decimals, comma) {
-  const fixed = value.toFixed(decimals);
-  if (!comma) return fixed;
-  const [int, frac] = fixed.split(".");
-  return int.replace(/\B(?=(\d{3})+(?!\d))/g, ",") + (frac ? "." + frac : "");
-}
-
-// 正解に近い、それらしい数字を3つ作る
-function numberDistractors(n) {
-  const { value, unit, decimals, comma } = n;
-  const thisYear = new Date().getFullYear();
-  const results = new Set();
-  for (let tries = 0; results.size < 3 && tries < 60; tries++) {
-    const sign = Math.random() < 0.5 ? -1 : 1;
-    let v;
-    if (unit === "年" && value >= 1000) v = value + sign * randInt(3, 120);
-    else if (unit === "年代") v = value + sign * 10 * randInt(1, 4);
-    else if (unit === "世紀" || unit === "位") v = value + sign * randInt(1, 3);
-    else if (/^(%|％|パーセント)$/.test(unit)) v = Math.min(100, value + sign * randInt(5, 30));
-    else if (value < 10 && decimals === 0) v = value + sign * randInt(1, 4);
-    else v = value * [0.3, 0.5, 0.7, 1.5, 2, 3, 5][randInt(0, 6)];
-    if (decimals === 0) v = Math.round(v);
-    if (v <= 0 || v === value || (unit === "年" && v > thisYear)) continue;
-    results.add(formatNumber(v, decimals, comma) + unit);
-  }
-  results.delete(n.term);
-  return results.size >= 3 ? [...results].slice(0, 3) : null;
-}
-
 function scriptOf(s) {
   if (/^[゠-ヿー・]+$/.test(s)) return "katakana";
   if (/^[぀-ゟー]+$/.test(s)) return "hiragana";
@@ -346,47 +288,33 @@ async function buildArticleQuestions(article, themeNames, count) {
     for (const l of s.links) {
       if (!isGoodTerm(l.text, themeNames) || themeNames.has(l.target)) continue;
       if (!pool.has(l.target)) pool.set(l.target, { text: l.text, target: l.target });
-      candidates.push({ kind: "link", s, raw: s.raw, term: l.text, target: l.target });
-    }
-    for (const n of findNumbers(s.raw)) {
-      candidates.push({ kind: "number", s, raw: s.raw, ...n });
+      candidates.push({ s, raw: s.raw, term: l.text, target: l.target });
     }
   }
   if (candidates.length === 0) return [];
 
   // 問題の候補になる言葉を優先してカテゴリを調べる
-  const answerTargets = new Set(candidates.filter((c) => c.kind === "link").map((c) => c.target));
+  const answerTargets = new Set(candidates.map((c) => c.target));
   const titles = [...answerTargets, ...[...pool.keys()].filter((t) => !answerTargets.has(t))].slice(0, MAX_POOL_TITLES);
   const catsMap = titles.length ? await fetchCategories(titles) : new Map();
 
   // 概要より本文の節のほうが雑学っぽいので先に使う（同じ節の中ではランダム）
   const ordered = shuffle(candidates).sort((a, b) => (a.s.section === "概要") - (b.s.section === "概要"));
-  const maxNumbers = Math.ceil(count / 2);
   const usedSentences = new Set();
   const usedAnswers = new Set();
   const questions = [];
-  let numbers = 0;
 
   for (const c of ordered) {
     if (questions.length >= count) break;
     if (usedSentences.has(c.s) || usedAnswers.has(c.term)) continue;
-    if (c.kind === "number" && numbers >= maxNumbers) continue;
+    if (!catsMap.has(c.target)) continue;
 
-    let text;
-    let distractors;
-    if (c.kind === "link") {
-      if (!pool.has(c.target) || !catsMap.has(c.target)) continue;
-      distractors = linkDistractors(c, pool, catsMap);
-      text = cleanSentence(c.raw.split(c.term).join(BLANK));
-    } else {
-      distractors = numberDistractors(c);
-      text = cleanSentence(c.raw.slice(0, c.offset) + BLANK + c.raw.slice(c.offset + c.length));
-    }
+    const distractors = linkDistractors(c, pool, catsMap);
+    const text = cleanSentence(c.raw.split(c.term).join(BLANK));
     if (!distractors || !text || !text.includes(BLANK)) continue;
 
     usedSentences.add(c.s);
     usedAnswers.add(c.term);
-    if (c.kind === "number") numbers++;
     questions.push({
       prompt: `「${displayName(title)}」の記事より。${BLANK}に入るのは？`,
       text,
