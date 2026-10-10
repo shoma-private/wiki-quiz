@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src https://ja.wikipedia.org; img-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>なんでも4択クイズ</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <section id="start">
+      <h1>なんでも4択クイズ</h1>
+      <p class="lead">好きなテーマを入れると、Wikipedia の記事から4択クイズを作ります。</p>
+      <form id="start-form">
+        <label for="theme">テーマ</label>
+        <input id="theme" type="text" placeholder="例: ビール" maxlength="50" required autocomplete="off" enterkeyhint="go">
+        <div class="chips">
+          <button type="button" class="chip">ビール</button>
+          <button type="button" class="chip">日本酒</button>
+          <button type="button" class="chip">ラーメン</button>
+          <button type="button" class="chip">戦国武将</button>
+          <button type="button" class="chip">恐竜</button>
+          <button type="button" class="chip">宇宙</button>
+        </div>
+        <label for="count">問題数</label>
+        <select id="count">
+          <option value="5">5問</option>
+          <option value="10" selected>10問</option>
+          <option value="15">15問</option>
+        </select>
+        <button type="submit" class="primary">クイズを作る</button>
+      </form>
+      <p id="error" class="error" hidden></p>
+    </section>
+
+    <section id="loading" hidden>
+      <div class="spinner"></div>
+      <p id="loading-text"></p>
+    </section>
+
+    <section id="quiz" hidden>
+      <div class="quiz-header">
+        <span id="quiz-theme"></span>
+        <span id="progress"></span>
+      </div>
+      <p class="question-label">この説明に当てはまるのはどれ？</p>
+      <blockquote id="question"></blockquote>
+      <div id="choices" class="choices"></div>
+      <div id="feedback" hidden>
+        <p id="feedback-text"></p>
+        <a id="source-link" target="_blank" rel="noopener noreferrer"></a>
+        <button id="next" type="button" class="primary"></button>
+      </div>
+      <button id="quit" type="button" class="link-button">やめる</button>
+    </section>
+
+    <section id="result" hidden>
+      <h2>結果</h2>
+      <p id="score"></p>
+      <p id="comment"></p>
+      <ol id="review"></ol>
+      <button id="retry" type="button" class="primary">同じテーマでもう一度</button>
+      <button id="new-theme" type="button">別のテーマで遊ぶ</button>
+    </section>
+  </main>
+
+  <footer>
+    問題文は <a href="https://ja.wikipedia.org/" target="_blank" rel="noopener noreferrer">Wikipedia</a> の記事から引用し、答えを伏せるなどの改変をしています。
+    ライセンス: <a href="https://creativecommons.org/licenses/by-sa/4.0/deed.ja" target="_blank" rel="noopener noreferrer">CC BY-SA 4.0</a>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>
