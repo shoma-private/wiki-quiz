@@ -65,12 +65,24 @@ main{flex:1;position:relative;min-height:0}
 .toast{position:absolute;left:50%;top:10px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:7px 14px;border-radius:999px;font-size:13px;z-index:500;max-width:calc(100% - 32px);text-align:center;box-shadow:var(--shadow)}
 .redo{position:absolute;left:50%;bottom:calc(18px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:450;border:0;background:var(--surface);color:var(--ink);padding:10px 16px;border-radius:999px;box-shadow:var(--shadow);font-weight:700;white-space:nowrap}
 
-.card{display:flex;gap:12px;align-items:flex-start;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:12px;text-align:left;width:100%}
+.card{display:flex;align-items:stretch;background:var(--surface);border:1px solid var(--line);border-radius:14px;flex:none}
+.card.faint{opacity:.72}
+.cardmain{flex:1;min-width:0;display:flex;gap:12px;align-items:flex-start;border:0;background:none;padding:12px;text-align:left;border-radius:14px 0 0 14px}
 .card .dot{flex:none;width:10px;height:10px;border-radius:50%;margin-top:7px}
 .card .body{flex:1;min-width:0}
 .card .name{font:700 15px/1.4 var(--display);margin:0;overflow-wrap:anywhere}
-.card .meta{font-size:12.5px;color:var(--muted);display:flex;flex-wrap:wrap;gap:2px 10px}
-.card .dist{flex:none;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;margin-top:3px}
+.card .meta{font-size:12.5px;color:var(--muted);display:flex;flex-wrap:wrap;gap:2px 10px;font-variant-numeric:tabular-nums}
+.gm{flex:none;width:68px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border-left:1px solid var(--line);color:var(--ink);text-decoration:none;font-size:11px;font-weight:700;border-radius:0 14px 14px 0}
+.gm:active,.cardmain:active{background:var(--bg)}
+.divider{margin:12px 0 0;font:700 13px var(--display);display:flex;flex-direction:column}
+.divider span{font:400 12px var(--body);color:var(--muted)}
+.timeset{display:flex;flex-direction:column;gap:8px;background:var(--bg);border-radius:12px;padding:12px}
+.timeset .times{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.timeset input[type=time]{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:6px 8px;font-size:16px}
+.offdays{display:flex;gap:4px;flex-wrap:wrap}
+.offdays button{width:36px;height:36px;border-radius:50%;border:1px solid var(--line);background:var(--surface);font-weight:500}
+.offdays button[aria-pressed="true"]{background:var(--closed);border-color:var(--closed);color:#fff}
+.mine{font-size:11px;background:var(--berry-soft);color:var(--berry);border-radius:999px;padding:1px 8px;margin-left:6px;font-weight:700;letter-spacing:0}
 .st-open{color:var(--open);font-weight:500}
 .dot.open{background:var(--open)} .dot.closed{background:var(--closed)} .dot.unknown{background:var(--unknown)}
 .heart{color:var(--berry);font-weight:700}
@@ -202,6 +214,7 @@ function distance(a, b) {
   const x = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLon / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(x));
 }
+const GM_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.3"/></svg>';
 const fmtDist = (m) => (m < 1000 ? `${Math.round(m / 10) * 10}m` : `${(m / 1000).toFixed(1)}km`);
 const walk = (m) => `徒歩${Math.max(1, Math.round(m / 80))}分`;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -228,7 +241,16 @@ function cafeFromOSM(el) {
 const isSweets = (c) => /cake|dessert|pastry|crepe|pancake|ice_cream|donut|bakery|sweet|parfait|tart|chocolate|waffle/i.test(c.cuisine)
   || /ケーキ|パティスリー|スイーツ|パフェ|クレープ|パンケーキ|甘味|タルト|ドーナツ/.test(c.name);
 const savedOf = (c) => store.saved[c.id];
-const stOf = (c) => CafeHours.status(c.hours, new Date());
+const DAYS_EN = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+// 自分で入力した営業時間 {open:"10:00", close:"18:00", off:[0..6]} → OSM形式
+function mySpec(h) {
+  if (!h || !h.open || !h.close) return "";
+  const days = DAYS_EN.filter((_, i) => !(h.off || []).includes(i));
+  if (!days.length) return "off";
+  return `${days.join(",")} ${h.open}-${h.close}`;
+}
+const specOf = (c) => mySpec(savedOf(c)?.myHours) || c.hours;
+const stOf = (c) => CafeHours.status(specOf(c), new Date());
 
 // ---------- 検索 ----------
 async function searchCafes(pt) {
@@ -295,12 +317,16 @@ function visible() {
   if (filters.saved) for (const s of Object.values(store.saved)) if (!byId.has(s.info.id)) byId.set(s.info.id, s.info);
   let list = [...byId.values()];
   if (filters.saved) list = list.filter(savedOf);
-  if (filters.open) list = list.filter((c) => stOf(c).state === "open");
+  // 「今あいてる」：営業時間外だけ外し、時間不明の店は下に残す
+  if (filters.open) list = list.filter((c) => stOf(c).state !== "closed");
   if (filters.sweets) list = list.filter((c) => isSweets(c) || savedOf(c)?.sweets);
   const ref = me || center;
   list.forEach((c) => (c._d = ref ? distance(ref, c) : 0));
-  // 保存→営業中→距離の順
-  const rank = (c) => (savedOf(c) ? 0 : 2) + (stOf(c).state === "open" ? 0 : 1);
+  // 今あいてる時：営業中→時間不明（各々保存店が先）。通常：保存→営業中→距離
+  const S = { open: 0, unknown: 1, closed: 2 };
+  const rank = filters.open
+    ? (c) => S[stOf(c).state] * 2 + (savedOf(c) ? 0 : 1)
+    : (c) => (savedOf(c) ? 0 : 2) + (stOf(c).state === "open" ? 0 : 1);
   return list.sort((a, b) => rank(a) - rank(b) || a._d - b._d);
 }
 
@@ -323,12 +349,21 @@ function render() {
       : "<b>カフェを探しましょう</b>右上の現在地ボタンか、地名検索から";
     L_.innerHTML = `<p class="empty">${why}</p>`;
   } else {
+    let dividerDone = false;
     L_.innerHTML = list.map((c, i) => {
       const st = stOf(c), sv = savedOf(c);
-      const extra = [sv ? `<span class="heart">♥ ${sv.status === "been" ? "行った" : "行きたい"}${sv.taste ? " · 味" + "★".repeat(sv.taste) : ""}</span>` : "", isSweets(c) ? "スイーツ" : ""].filter(Boolean).join("");
-      return `<button class="card" data-i="${i}"><span class="dot ${st.state}"></span><span class="body"><p class="name">${esc(c.name)}</p><span class="meta"><span class="${st.state === "open" ? "st-open" : ""}">${esc(st.label)}</span>${extra ? `<span>${extra}</span>` : ""}</span></span><span class="dist">${c._d ? fmtDist(c._d) : ""}</span></button>`;
+      const extra = [sv ? `<span class="heart">♥ ${sv.status === "been" ? "行った" : "行きたい"}${sv.taste ? " · 味" + "★".repeat(sv.taste) : ""}</span>` : "", isSweets(c) ? "スイーツ" : ""].filter(Boolean).join(" · ");
+      let head = "";
+      if (filters.open && st.state === "unknown" && !dividerDone) {
+        dividerDone = true;
+        head = `<p class="divider">営業時間がわからないお店<span>あいているかはGoogleマップで確認してね</span></p>`;
+      }
+      return `${head}<div class="card ${st.state === "unknown" && filters.open ? "faint" : ""}">
+        <button class="cardmain" data-i="${i}"><span class="dot ${st.state}"></span><span class="body"><p class="name">${esc(c.name)}</p><span class="meta"><span class="${st.state === "open" ? "st-open" : ""}">${esc(st.label)}</span>${c._d ? `<span>${fmtDist(c._d)}</span>` : ""}${extra ? `<span>${extra}</span>` : ""}</span></span></button>
+        <a class="gm" href="${gmapsUrl(c)}" target="_blank" rel="noopener" aria-label="${esc(c.name)}をGoogleマップで開く">${GM_ICON}<span>Gマップ</span></a>
+      </div>`;
     }).join("");
-    L_.querySelectorAll(".card").forEach((b) => b.addEventListener("click", () => openSheet(list[+b.dataset.i])));
+    L_.querySelectorAll(".cardmain").forEach((b) => b.addEventListener("click", () => openSheet(list[+b.dataset.i])));
   }
 }
 
@@ -346,7 +381,9 @@ function gmapsUrl(c) {
 function drawSheet() {
   const c = current, st = stOf(c), sv = savedOf(c);
   const ref = me || center; const d = ref ? distance(ref, c) : 0;
-  const tbl = CafeHours.table(c.hours);
+  const spec = specOf(c), mine = !!mySpec(sv?.myHours);
+  const tbl = CafeHours.table(spec);
+  const mh = sv?.myHours;
   const today = (new Date().getDay() + 6) % 7;
   const tags = [isSweets(c) && "スイーツ", c.outdoor && "テラス席", c.takeaway && "テイクアウト", c.wifi && "Wi-Fi",
     c.smoking === "no" && "禁煙", c.brand && "チェーン店"].filter(Boolean);
@@ -361,10 +398,17 @@ function drawSheet() {
       <button class="btn ${sv ? "love" : ""}" id="saveBtn">${sv ? "♥ 保存済み" : "♡ 行きたい"}</button>
     </div>
     ${tags.length ? `<div class="sec"><div class="tags">${tags.map((t) => `<span class="tag">${t}</span>`).join("")}</div></div>` : ""}
-    <div class="sec"><h3>営業時間</h3>
+    <div class="sec"><h3>営業時間${mine ? '<span class="mine">自分で入力</span>' : ""}</h3>
       ${tbl ? `<div class="hours">${tbl.map((r, i) => `<span class="${i === today ? "today" : ""}">${r.day}</span><span class="${i === today ? "today" : ""}">${r.text}</span>`).join("")}</div>
-        <p class="small">地図データの情報です。臨時休業などはGoogleマップで確認してね</p>`
-      : `<p class="small">${c.hours ? `登録情報：${esc(c.hours)}` : "営業時間の登録がありません。"} Googleマップで確認してね</p>`}
+        <p class="small">${mine ? "あなたが入力した時間です" : "地図データの情報です"}。臨時休業などはGoogleマップで確認してね</p>`
+      : `<p class="small">${c.hours ? `登録情報：${esc(c.hours)}` : "営業時間の登録がありません。"} Googleマップで確認してね${sv ? "。わかったら下で入力できます" : "。保存すると自分で入力できます"}</p>`}
+      ${sv ? (mh ? `
+      <div class="timeset">
+        <div class="times"><label for="hOpen">開店</label><input type="time" id="hOpen" value="${esc(mh.open)}" step="900"><span>〜</span><label for="hClose">閉店</label><input type="time" id="hClose" value="${esc(mh.close)}" step="900"></div>
+        <div><span class="small">定休日（押すとグレーになります）</span>
+          <div class="offdays" role="group" aria-label="定休日">${["月","火","水","木","金","土","日"].map((d, i) => `<button data-off="${i}" aria-pressed="${(mh.off || []).includes(i)}">${d}</button>`).join("")}</div></div>
+        <button class="linkish" id="hClear">入力した営業時間を消す</button>
+      </div>` : `<button class="btn" id="hStart">${c.hours ? "営業時間を自分で直す" : "営業時間を入力する"}</button>`) : ""}
     </div>
     ${sv ? `
     <div class="sec"><h3>わたしのメモ</h3>
@@ -386,6 +430,29 @@ function drawSheet() {
     persist(); toast("保存しました"); drawSheet();
   };
   if (!sv) return;
+  if ($("hStart")) $("hStart").onclick = () => {
+    // 地図データに時間があればそれを下書きに
+    let open = "10:00", close = "18:00", off = [];
+    const wk = CafeHours.parse(c.hours);
+    if (wk) {
+      const first = wk.find((t) => t.length);
+      if (first) {
+        const f = (m) => `${String(Math.floor((m % 1440) / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+        open = f(first[0][0]); close = f(first[first.length - 1][1]);
+      }
+      off = wk.map((t, i) => (t.length ? -1 : i)).filter((i) => i >= 0);
+    }
+    sv.myHours = { open, close, off }; persist(); drawSheet();
+  };
+  if (mh) {
+    const setT = (k) => (e) => { if (e.target.value) { mh[k] = e.target.value; persist(); drawSheet(); } };
+    $("hOpen").onchange = setT("open"); $("hClose").onchange = setT("close");
+    $("sheet").querySelectorAll("[data-off]").forEach((b) => (b.onclick = () => {
+      const i = +b.dataset.off, s = new Set(mh.off || []);
+      s.has(i) ? s.delete(i) : s.add(i); mh.off = [...s].sort(); persist(); drawSheet();
+    }));
+    $("hClear").onclick = () => { delete sv.myHours; persist(); drawSheet(); };
+  }
   $("sheet").querySelectorAll("[data-st]").forEach((b) => (b.onclick = () => { sv.status = b.dataset.st; persist(); drawSheet(); }));
   $("sheet").querySelectorAll("[data-k]").forEach((b) => (b.onclick = () => {
     const n = +b.dataset.n; sv[b.dataset.k] = sv[b.dataset.k] === n ? 0 : n; persist(); drawSheet();
